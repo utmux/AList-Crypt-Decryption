@@ -25,7 +25,7 @@ class RcloneConfigError(RcloneError):
     pass
 
 
-class RcloneAlistDecryptor:
+class RcloneAlistCrypto:
     """AList Crypt 解密工具类"""
 
     def __init__(
@@ -201,6 +201,37 @@ class RcloneAlistDecryptor:
         config_file.close()
         return config_file.name
 
+    def encrypt(self, source_dir: Optional[str] = None,
+              target_dir: Optional[str] = None) -> bool:
+        """
+        执行加密操作
+
+        Args:
+            source_dir: 源目录路径 (明文)
+            target_dir: 目标目录路径 (加密后)
+
+        Returns:
+            bool: 加密是否成功
+        """
+        # 对于加密，源是明文目录，目标是加密目录
+        # 注意：这里我们反转 decrypt 的逻辑。
+        # self.encrypt_dir 在配置文件中通常指代加密目录
+        src = source_dir # 必须由用户提供
+        dst = target_dir or self.encrypt_dir
+
+        # 验证路径
+        if not src or not os.path.exists(src):
+            raise FileNotFoundError(f"源目录 (明文) 不存在: {src}")
+        if not dst:
+            raise ValueError("目标目录 (加密) 未指定")
+
+        # 创建目标目录
+        os.makedirs(dst, exist_ok=True)
+
+        # 执行加密
+        return self._run_rclone_encrypt(src, dst)
+
+
     def decrypt(self, source_dir: Optional[str] = None,
                target_dir: Optional[str] = None) -> bool:
         """
@@ -232,6 +263,51 @@ class RcloneAlistDecryptor:
 
         # 执行解密
         return self._run_rclone_decrypt(src, dst)
+    def _run_rclone_encrypt(self, src: str, dst: str) -> bool:
+        """执行 rclone 加密命令"""
+        # 核心：配置文件中的 remote 指向的是加密目录 (dst)
+        config_path = self._create_rclone_config(dst)
+        
+        try:
+            # 核心：命令是从本地源 (src) 复制到 crypt 远程
+            cmd = [
+                "rclone", "copy",
+                "--progress",
+                "--log-level", "ERROR",
+                "--stats", "1s",
+                "--config", config_path,
+                src,  # 源：本地明文目录
+                "alist_crypt:"  # 目标：加密远程的根目录
+            ]
+            
+            print("\n" + "="*50)
+            print("开始执行加密操作")
+            print("-"*50)
+            print(f"源目录 (明文): {src}")
+            print(f"目标目录 (加密): {dst}")
+            print("-"*50)
+            
+            process = subprocess.run(cmd, check=True)
+            
+            if process.returncode == 0:
+                print("="*50)
+                print("加密操作已完成")
+                print("="*50 + "\n")
+                return True
+            
+            print("\n" + "="*50)
+            print(f"加密失败，返回码：{process.returncode}")
+            print("="*50 + "\n")
+            return False
+        
+        except subprocess.SubprocessError as e:
+            print("\n" + "="*50)
+            print(f"执行失败：{e}")
+            print("="*50 + "\n")
+            return False
+        finally:
+            # 别忘了删除临时配置文件
+            os.unlink(config_path)
 
     def _run_rclone_decrypt(self, src: str, dst: str) -> bool:
         """执行 rclone 解密命令"""
@@ -287,9 +363,17 @@ def parse_args() -> argparse.ArgumentParser:
         argparse.ArgumentParser: 参数解析器对象
     """
     parser = argparse.ArgumentParser(
-        description='AList Crypt 解密工具 (基于rclone)',
+        description='AList Crypt 加解密工具 (基于rclone)',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    
+    # 新增 action 参数
+    parser.add_argument(
+        'action', 
+        choices=['encrypt', 'decrypt'], 
+        help='要执行的操作: "encrypt" (加密) 或 "decrypt" (解密)'
+    )
+
     
     parser.add_argument('--config', help='配置文件路径')
     parser.add_argument('--password', help='AList Crypt 密码')
@@ -333,21 +417,18 @@ def main() -> None:
     parser = parse_args()
     args = parser.parse_args()
     
-    # 如果没有任何参数，显示帮助信息并退出
-    if not any(vars(args).values()):
-        parser.print_help()
-        return
-    
     try:
+        # 使用配置文件方式的逻辑需要调整，这里我们先重点关注命令行参数方式
         if args.config:
-            decryptor = RcloneAlistDecryptor(config_file=args.config)
-            decryptor.decrypt()
+            # 使用配置文件时，需要确定是加密还是解密
+            # 这里简化处理，假设配置文件定义了操作
+            # 一个更完善的实现可能需要配置文件里也指明 'action'
+            print("配置文件模式需要额外逻辑来确定操作，暂未完全实现。")
+            return 1
+
         else:
-            if not args.input:  # 只检查输入目录
-                parser.print_help()
-                return
-                
-            decryptor = RcloneAlistDecryptor(
+            # 创建实例
+            crypto_tool = RcloneAlistCrypto(  # 假设类已重命名
                 password=args.password,
                 salt=args.salt,
                 filename_encryption=args.filename_encryption,
@@ -357,14 +438,22 @@ def main() -> None:
                 plaintext_password=not args.no_plaintext_password
             )
             
-            decryptor.decrypt(args.input, args.output)  # output 可以为 None
+            if args.action == 'encrypt':
+                crypto_tool.encrypt(source_dir=args.input, target_dir=args.output)
+            elif args.action == 'decrypt':
+                # 注意：解密时，input 是加密目录，output 是明文目录
+                # 为了和 decrypt 方法的参数名一致，调整一下
+                crypto_tool.decrypt(source_dir=args.input, target_dir=args.output)
             
     except Exception as e:
         print(f"\n错误: {e}")
-        return 1
-    
-    return 0
+        # return 1 # 在 __main__ 中处理 exit code
+        raise # 重新抛出异常，以便在 __main__ 中捕获并设置 exit code
 
-
+# 在 if __name__ == "__main__": 中更好地处理退出
 if __name__ == "__main__":
-    exit(main())
+    try:
+        main()
+        exit(0)
+    except Exception:
+        exit(1)
