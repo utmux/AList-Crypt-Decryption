@@ -154,6 +154,7 @@ class CryptoGUI(tk.Tk):
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding='utf-8',
+                errors='replace',
                 bufsize=1, # 行缓冲
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0 # Windows下不显示控制台窗口
             )
